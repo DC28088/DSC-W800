@@ -19,6 +19,16 @@ what motivated this investigation.
 > `MonitorFlashDumpData` (firmware dump). The most promising route is now the
 > **serial Monitor**, not a blind NAND teardown.
 >
+> **Update — the USB *software* avenue is now fully mapped and closed.** Live
+> probing shows the `0x7A` surface is device‑info‑only (the firmware ignores the
+> command category and implements just "return device info"); the memory‑dump /
+> debug‑terminal / write‑enable primitives all live behind Sony **service mode**,
+> which **does not open on this camera** (`StartSenser` times out). The documented
+> write path (the W830 service manual's **Write Enable Tool**) needs Sony's
+> proprietary Adjust software and only writes internal‑memory *user data*, not
+> firmware. So the realistic routes to manual exposure are **hardware‑side** — the
+> UART Monitor or the firmware. Details: [USB investigation](docs/usb-investigation.md).
+>
 > *An earlier version of this README concluded "software dead end / no
 > remote-control API." That was premature and is **retracted** — see
 > [What we actually found](#what-we-actually-found) and
@@ -124,13 +134,17 @@ vendor extension.**
 |---|---|
 | USB MTP/PTP device properties / ops | Microsoft MTP, file transfer only — **no** exposure control. (Genuine dead end for PTP.) |
 | USB Mass Storage, SCSI `0xC0`–`0xFF` | No *Lytro-style* channel in that range (but range was incomplete — see below) |
-| **Sony vendor channel, SCSI opcode `0x7A`** | ✅ **Works** — returns model `DSC-W800`, model code `0080816029`, DeviceInfoXML `1.2.02.0730` |
-| **Sony updater query protocol** (ext cmd cat 0) | ✅ **Works** — `GET_STATE` (0x200) → state 256; `QUERY_VERSION` (0x20) → version `1.600` |
-| PMCA service/senser authentication | ✖️ `StartSenser` + first auth read time out in the tested setup (not proven absent) |
+| **Sony vendor channel, SCSI opcode `0x7A`** | ✅ Works, but **device‑info‑only** — `GetModelInfo` returns a DeviceInfoXML plist; the firmware ignores the command category and implements only "return device info" (every other category/subcommand collapses to it or stalls). No debug/monitor/memory category. |
+| **Sony updater query protocol** (ext cmd cat 0) | ✅ Reads work — `GET_STATE` (0x200) → state 256; `QUERY_VERSION` (0x20) → version `1.600`. (The `WRITE_FIRM` path exists but is signed.) |
+| PMCA **service/senser mode** (dump, terminal‑enable, write‑enable live here) | ✖️ `StartSenser` times out — **service mode does not open** on this COACH body |
 
-So the camera **does** expose a Sony vendor command transport and an updater
-query protocol. No *firmware-read* command has been demonstrated there yet, and
-PTP has no exposure control — but "no remote-control API" was wrong.
+So the camera exposes a Sony command transport, but over USB it is limited to
+**device‑info reads + updater queries + the signed firmware‑update write**. The
+memory‑dump, debug‑terminal and write‑enable primitives all sit behind **service
+mode, which doesn't open here**, and the documented **Write Enable Tool** (W830
+service manual) needs Sony's proprietary Adjust software and writes only
+internal‑memory user data. **The USB software avenue is closed** — full analysis
+in [`docs/usb-investigation.md`](docs/usb-investigation.md).
 
 *(Credit: the `0x7A` / updater results and the review that corrected the original
 conclusion come from a parallel investigation; reproduced here honestly.)*
@@ -239,9 +253,11 @@ the goal *and* firmware acquisition without any flashing.
 ├── images/
 │   └── mainboard.jpg             Main board / COACH 15S SoC photo
 ├── tools/
-│   └── coach_probe.py            Read-only SCSI vendor-opcode prober (Linux, stdlib)
+│   ├── coach_probe.py            Read-only SCSI vendor-opcode prober (Linux, stdlib)
+│   └── sony_extcmd_probe.py      Read-only Sony 0x7A external-command enumerator
 └── docs/
     ├── investigation-log.md      Raw command transcripts (USB, SCSI, PTP)
+    ├── usb-investigation.md      Sony 0x7A surface, service-mode blocker, Write Enable Tool
     └── hardware-plan.md          UART hunt, NAND dump, MX30LF1208AA pinout, Ghidra, reflash
 ```
 
@@ -276,6 +292,11 @@ sudo python3 tools/coach_probe.py --device /dev/sgN --probe-vendor   # walk 0xC0
   completeness).
 - [jam1garner/wb35f-research](https://github.com/jam1garner/wb35f-research) —
   Samsung WB35F, another COACH-family reverse-engineering effort.
+- DSC-W830 service manual (Ver. 1.1) — sibling model; documents the **Write Enable
+  Tool** USB procedure and the SY-1035 (COACH) board. Used as reference; the W800
+  shares the platform.
+- `pmca/usb/sony.py` (Sony-PMCA-RE) — the authoritative Sony USB command map
+  (external-command `0x7A`, updater, and Senser service-mode primitives).
 - Nikon COOLPIX S3600 firmware (v1.2) — the COACH 15S / COACHWare reference image
   whose embedded symbols revealed the Monitor. Used offline as a platform
   reference only; **not** a W800 payload.
