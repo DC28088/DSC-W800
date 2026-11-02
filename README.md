@@ -155,6 +155,23 @@ The CLI self-documents: type **`ls`** to list every registered command and
 `help <name>` for usage — so the exact tokens don't need to be reversed, only the
 monitor reached. `MonitorInit` registers the command lists unconditionally.
 
+**How the monitor is switched on (reference, traced by disassembly).** On the
+Nikon image the serial console is enabled by a single **compile-time constant**,
+not a strap or runtime probe: `AppInitDebug()` calls `HceGetMonitorType()`
+(hardcoded `0x21`) and passes it to `DebugInit()`, which stores the global
+`uiMonitorType` and opens the UART. The type is a bitfield — `0x21` = **bit0
+(console on) + bit5 (115200 baud)**, port bit clear → **UART 0**. The stdio
+backends only touch the UART when `uiMonitorType & 1`. So on the reference the
+console is **on by default at UART0, 115200 8N1**.
+
+For the W800 this constant is unknown, and it is binary: **if its bit0 is set**,
+the monitor is live at boot and a logic-analyzer sweep of the pads will show
+115200 traffic + a prompt; **if clear**, the console is silent and would need a
+firmware patch (flip the constant → dump+reflash), the crash/polling
+`DebugConsoleMain` path, or the USB route. Visual inspection can't distinguish the
+two — only a powered LA/scope sweep of the test points can, which is why "no
+obvious UART pins" is inconclusive on its own.
+
 **Confirmed** in the Nikon reference. **Unverified** for the W800 — but it is the
 same COACH15S / COACHWare family, so an equivalent Monitor is plausible. If the
 W800 exposes it on a UART, `MonitorSetExposure` is a **direct manual-shutter path

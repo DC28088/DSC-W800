@@ -45,6 +45,17 @@ Monitor. This is the single highest-value, lowest-risk step.
 > **`MonitorNandReadPhysical`** / **`MonitorFlashDumpData`** (dump firmware).
 > The reference baud is **115200 8N1**; its full candidate set is
 > `115200, 230400, 460800, 921600, 38400, 9600`.
+>
+> **Whether the console is even active is one firmware constant.** On the
+> reference, boot calls `AppInitDebug` → `HceGetMonitorType()` (hardcoded `0x21`)
+> → `DebugInit`, which sets `uiMonitorType = 0x21` and opens the UART because
+> bit0 is set (bit5 → 115200, port bit clear → UART0). No GPIO strap is involved.
+> If the W800 ships the equivalent constant with **bit0 set**, a powered
+> logic-analyzer sweep of the pads **will** show 115200 traffic at boot; if
+> **bit0 clear**, the pads are silent and the Monitor can't be reached over UART
+> without first patching firmware. So: **sweep with an LA before concluding there
+> is no UART** — eyeballing the board can't tell an absent header from a disabled
+> console.
 
 1. **Power the board on the bench** (external supply or battery) with the back
    accessible.
