@@ -147,7 +147,11 @@ property.**
 
 ---
 
-## Conclusion
+## Conclusion (updated)
 
-No control channel over either USB mode. See the main
-[README](../README.md#conclusion--software-dead-end).
+These particular probes (PTP properties; the `0xC0`–`0xFF` SCSI sweep) found no
+control channel — but this was **not** the whole story. A later parallel
+investigation showed Sony opcode **`0x7A`** and the updater query protocol do
+respond, and a COACH **UART debug Monitor** is the real lead. See
+[What we actually found](../README.md#what-we-actually-found) and
+[the COACH Monitor lead](../README.md#the-coach-monitor-lead) in the README.

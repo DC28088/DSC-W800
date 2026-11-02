@@ -10,10 +10,19 @@ was [successfully reverse engineered](https://github.com/ea/lytro_unlock) to
 expose hidden manual controls over a vendor command channel. That precedent is
 what motivated this investigation.
 
-> **Status: software avenues over USB are exhausted — no remote-control API
-> exists. Manual control will require hardware-level firmware reverse
-> engineering (UART + NAND dump + patch + reflash).** See
-> [What's next](#whats-next).
+> **Status (corrected 2026-11-02):** The camera's *PTP* interface exposes no
+> exposure control, and a Lytro-style SCSI sweep (`0xC0`–`0xFF`) found no
+> channel — **but this is not a dead end.** A Sony vendor command channel (SCSI
+> opcode **`0x7A`**) and the Sony **updater query protocol** both respond on the
+> W800, and the COACH platform ships a **UART debug Monitor** whose command set
+> includes `MonitorSetExposure` (manual exposure) and `MonitorNandReadPhysical` /
+> `MonitorFlashDumpData` (firmware dump). The most promising route is now the
+> **serial Monitor**, not a blind NAND teardown.
+>
+> *An earlier version of this README concluded "software dead end / no
+> remote-control API." That was premature and is **retracted** — see
+> [What we actually found](#what-we-actually-found) and
+> [the COACH Monitor lead](#the-coach-monitor-lead).*
 
 ---
 
@@ -63,7 +72,7 @@ The camera offers **Mass Storage** and **MTP/PTP** USB modes (Menu → Setup →
 USB Connect). Both were probed. Full command transcripts are in
 [`docs/investigation-log.md`](docs/investigation-log.md).
 
-### 1. USB Mass Storage — SCSI vendor channel → **dead end**
+### 1. USB Mass Storage — Lytro-style SCSI sweep → **no channel in `0xC0`–`0xFF`** (incomplete)
 
 The Lytro is driven by **SCSI vendor-specific opcodes** (`0xC0`–`0xC6`) sent
 over the USB Mass Storage interface. SCSI reserves the opcode range
@@ -78,13 +87,20 @@ Findings:
   - **LUN 1, LUN 2** → `ready` = internal-memory areas.
 - Standard INQUIRY / VPD advertise only the standard pages (`00 80 83`) — no
   vendor VPD page.
-- **Walking every vendor opcode `0xC0`–`0xFF` (data-in, read-only) on both ready
-  LUNs returned `ILLEGAL REQUEST / INVALID COMMAND OPERATION CODE` for all of
-  them.** The firmware's SCSI dispatcher recognises **no** vendor opcode.
+- **Walking every vendor opcode `0xC0`–`0xFF` (data-in) on both ready LUNs
+  returned `ILLEGAL REQUEST / INVALID COMMAND OPERATION CODE`.** No *Lytro-style*
+  `0xC0`–`0xC6` channel is present.
 
-➡️ **No COACH-style SCSI control channel exists over Mass Storage.**
+➡️ No COACH-style SCSI control channel in the `0xC0`–`0xFF` range. **Caveats
+(important):** this sweep does **not** prove "no vendor channel" — it missed Sony
+opcode **`0x7A`, which does work** (below the swept range; see
+[What we actually found](#what-we-actually-found)); its generic CDB framing and
+LUN 1/2 targeting do **not** replicate Lyli's actual Lytro sequence (a specific
+12-byte `0xC2` command on LUN 0); and "data-in" specifies a transfer *direction*,
+not the absence of camera-side effects, so the probe is **not** truly "read-only
+by construction."
 
-### 2. USB MTP/PTP — device properties & operations → **dead end**
+### 2. USB MTP/PTP — device properties & operations → **dead end (for control)**
 
 In MTP mode the camera enumerates as a generic *"USB PTP Class Camera"*.
 `gphoto2 --summary` / `--list-all-config` report:
@@ -102,75 +118,99 @@ In MTP mode the camera enumerates as a generic *"USB PTP Class Camera"*.
 ➡️ **PTP is a file-transfer-only interface with no control surface and no Sony
 vendor extension.**
 
-### Conclusion — software dead end
+## What we actually found
 
 | Vector | Result |
 |---|---|
-| USB Mass Storage, SCSI vendor opcodes `0xC0`–`0xFF` | No vendor channel — all opcodes rejected |
-| USB MTP/PTP device properties | Microsoft MTP, file transfer only, no control properties |
-| USB MTP/PTP capture / vendor ops | No capture capability, no Sony vendor extension |
+| USB MTP/PTP device properties / ops | Microsoft MTP, file transfer only — **no** exposure control. (Genuine dead end for PTP.) |
+| USB Mass Storage, SCSI `0xC0`–`0xFF` | No *Lytro-style* channel in that range (but range was incomplete — see below) |
+| **Sony vendor channel, SCSI opcode `0x7A`** | ✅ **Works** — returns model `DSC-W800`, model code `0080816029`, DeviceInfoXML `1.2.02.0730` |
+| **Sony updater query protocol** (ext cmd cat 0) | ✅ **Works** — `GET_STATE` (0x200) → state 256; `QUERY_VERSION` (0x20) → version `1.600` |
+| PMCA service/senser authentication | ✖️ `StartSenser` + first auth read time out in the tested setup (not proven absent) |
 
-Unlike the Lytro — which was *designed* to be driven externally and therefore
-shipped a rich command channel — **the DSC-W800 exposes no remote-control API
-over USB at all.** There is no software backdoor because the front door was
-never built. USB also offers no firmware-update hijack path (`No File Upload`,
-generic MTP).
+So the camera **does** expose a Sony vendor command transport and an updater
+query protocol. No *firmware-read* command has been demonstrated there yet, and
+PTP has no exposure control — but "no remote-control API" was wrong.
 
-**Therefore, manual exposure control is only achievable by modifying the
-firmware itself.**
+*(Credit: the `0x7A` / updater results and the review that corrected the original
+conclusion come from a parallel investigation; reproduced here honestly.)*
+
+## The COACH Monitor lead
+
+The decisive find comes from offline analysis of a **COACH 15S reference
+firmware** (Nikon COOLPIX S3600 — same `CW_C15s` COACHWare SDK; it is a
+*reference*, **not** a W800 image and must never be flashed to the Sony). Its
+embedded symbol table reveals a full **COACHWare debug Monitor** — an interactive
+CLI (`Os/Cli/Monitor.c`) that on the reference runs over **UART port 0 at 115200
+8N1** and includes, among ~1000 commands:
+
+- **`MonitorSetExposure`** — direct manual-exposure control (**the goal**).
+- `MonitorFlashDumpData`, `MonitorNandReadPhysical`, `MonitorFlashRead`,
+  `MonitorDump` — **firmware / memory dump**.
+- `MonitorNandWritePhysical`, `MonitorNandBurnImage` — firmware write.
+- `MonitorFuncCall` (call any function), **`MonitorGdb`** (GDB stub),
+  `MonitorSetJtag`, `MonitorReboot`.
+
+The CLI self-documents: type **`ls`** to list every registered command and
+`help <name>` for usage — so the exact tokens don't need to be reversed, only the
+monitor reached. `MonitorInit` registers the command lists unconditionally.
+
+**Confirmed** in the Nikon reference. **Unverified** for the W800 — but it is the
+same COACH15S / COACHWare family, so an equivalent Monitor is plausible. If the
+W800 exposes it on a UART, `MonitorSetExposure` is a **direct manual-shutter path
+with no firmware modification**, and `MonitorNandReadPhysical` dumps the firmware.
+The `Burn` write path is wrapped by `BurnHash*` (integrity/possible signature) —
+which matters only if one later wants to *flash* modified firmware rather than use
+a runtime override.
 
 ---
 
 ## What's next
 
-The remaining path is hardware-level firmware reverse engineering.
+The lead is the **UART debug Monitor**, which (if present on the W800) offers both
+the goal *and* firmware acquisition without any flashing.
 
-> 📄 **Full procedure, tool list (with costs), and the MX30LF1208AA pinout:
+> 📄 **Full procedure, tool list, and the MX30LF1208AA pinout:
 > [`docs/hardware-plan.md`](docs/hardware-plan.md).**
 
-In rough order, cheapest/most-reversible first:
-
-1. **Find the UART debug console.**
-   Probe test points / unpopulated pads near the COACH with a logic analyzer or
-   3.3 V USB-UART adapter at power-on; look for a line that bursts data at boot
-   (try **115200**, then 57600/38400 8N1). A boot log alone reveals the CPU
-   core, RTOS, memory map, and possibly an interactive shell. **Reversible, no
-   permanent modification.**
-
-2. **Dump the firmware** from the `MX30LF1208AA` NAND.
-   - Best case: a UART bootloader read/dump command.
-   - Reliable case: read the NAND out-of-circuit with a NAND programmer, or
-     in-circuit if feasible.
-   - **Save a verified golden image before touching anything.**
-
-3. **Reverse engineer in Ghidra** (load as **MIPS**; confirm endianness from the
-   boot log).
-   - Locate the sensor I²C/SPI register writes, the auto-exposure loop, and any
-     debug / service-menu handler.
-   - Strings to hunt: `EXPOSURE`, `SHUTTER`, `GAIN`, `INTEG`, service/diag menu
-     tokens.
-   - Many Sony compacts have a **hidden service menu** (button combo at boot);
-     finding its handler could expose controls without any reflash.
-
-4. **Patch & reflash** the modified image. **← brick risk.**
-   Only after a verified dump, an out-of-circuit re-write path, and ideally a
-   UART recovery path exist.
+1. **Find the UART and look for a Monitor prompt.** Probe test points near the
+   COACH at power-on with a logic analyzer / 3.3 V USB-UART adapter. The
+   reference runs the Monitor on **UART port 0, 115200 8N1**; sweep
+   `115200 → 230400 → 460800 → 921600 → 38400 → 9600` (the reference's baud set)
+   if 115200 doesn't decode. A boot log alone yields CPU/endianness and memory
+   map. **Reversible, no permanent modification.**
+2. **If a prompt appears, type `ls`** to enumerate the registered commands, then
+   `help <name>`. Look for the W800's equivalents of `MonitorSetExposure`
+   (→ manual shutter, the goal) and `MonitorNandReadPhysical` / `MonitorFlashDumpData`
+   (→ firmware dump).
+3. **`MonitorSetExposure` first** — a *runtime* exposure override needs no
+   reflash and is fully reversible. Validate with EXIF + a timing-sensitive test.
+4. **Dump via the Monitor** (`MonitorNandReadPhysical` / `MonitorFlashDumpData`)
+   for offline analysis; hash and keep a golden copy. Only if the Monitor is
+   absent fall back to a hardware NAND read of the `MX30LF1208AA` (note: the NAND
+   holds the *compressed* image).
+5. **Ghidra (MIPS)** for deeper work; patch/reflash only as a last resort
+   (`Burn` is `BurnHash*`-checked — determine crypto-vs-integrity before relying
+   on flashing). **← brick risk.**
 
 ### Honest feasibility caveats
-- The COACH RTOS/firmware is far less documented than Canon DIGIC (CHDK) or the
-  Sony BIONZ bodies that [Sony-PMCA-RE](https://github.com/ma1co/sony-pmca-re)
-  targets. **Those tools do not apply to COACH cameras.**
-- Even with full code access, the sensor/ISP pipeline may not permit arbitrary
-  exposure times, and the firmware may be signed/opaque for reflashing.
-- This is a multi-weekend effort with a real chance of "not feasible." A
-  **sacrificial second body** is strongly recommended before any irreversible
-  step.
+- The Monitor evidence is from the **Nikon reference**; W800 applicability,
+  reachability, any auth, and the UART pin/voltage are **unverified**.
+- Most Monitor command handlers live in a **hardware-VLC-compressed** firmware
+  region, so the command tokens aren't statically readable — but the live `ls`
+  makes that moot on a running device.
+- The sensor/ISP pipeline may still constrain exposure range; `BurnHash*` may
+  gate reflashing. A **sacrificial second body** is wise before anything
+  irreversible.
+- COACH tooling is sparse; [Sony-PMCA-RE](https://github.com/ma1co/sony-pmca-re)
+  targets BIONZ/PMCA bodies and does **not** apply to COACH.
 
 ### Help wanted
 - Identification of the `ST33W`, `T35N`, `T120` parts and the shielded module.
-- A dumped/decapped firmware image and its load/update format.
-- Location of the UART pads on the W800 board.
-- Any known service-menu button combo for the W800.
+- Location of the UART pads on the W800 board, and whether a Monitor prompt
+  appears.
+- A W800 firmware dump and its container/update format.
+- Whether `MonitorEnalbePrintOnUsbCommand` implies a USB-reachable monitor path.
 
 ---
 
@@ -189,10 +229,13 @@ In rough order, cheapest/most-reversible first:
 ```
 
 ### `tools/coach_probe.py`
-A dependency-free (Python stdlib, Linux `SG_IO` ioctl) SCSI prober. It is
-**read-only by construction** — it only issues data-in / no-data commands and
-never a known write/erase opcode — used to test for a COACH vendor command
-channel over USB Mass Storage.
+A dependency-free (Python stdlib, Linux `SG_IO` ioctl) SCSI prober used to test
+for a Lytro-style COACH vendor channel over USB Mass Storage. It issues only
+data-in / no-data commands and no *known* write/erase opcode. **Caveat:** data-in
+specifies a transfer direction, not the camera-side effect of an *unknown* vendor
+opcode, so it is **not** guaranteed side-effect-free; it also only sweeps
+`0xC0`–`0xFF` (and so misses Sony's working `0x7A`). Treat it as an exploratory
+probe, not a safety guarantee.
 
 ```bash
 sudo python3 tools/coach_probe.py --list                       # find the camera's /dev/sgN
@@ -214,6 +257,11 @@ sudo python3 tools/coach_probe.py --device /dev/sgN --probe-vendor   # walk 0xC0
 - [ma1co/Sony-PMCA-RE](https://github.com/ma1co/sony-pmca-re) — Sony camera RE
   toolkit (applies to BIONZ/PMCA bodies, **not** COACH — documented here for
   completeness).
+- [jam1garner/wb35f-research](https://github.com/jam1garner/wb35f-research) —
+  Samsung WB35F, another COACH-family reverse-engineering effort.
+- Nikon COOLPIX S3600 firmware (v1.2) — the COACH 15S / COACHWare reference image
+  whose embedded symbols revealed the Monitor. Used offline as a platform
+  reference only; **not** a W800 payload.
 
 ---
 

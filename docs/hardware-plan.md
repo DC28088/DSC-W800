@@ -1,13 +1,21 @@
 # Hardware reverse-engineering plan
 
-Since [no software control path exists](../README.md#conclusion--software-dead-end),
-manual exposure requires getting *inside* the firmware. This is the plan, ordered
-cheapest / most-reversible first. Do not skip Phase 1→2 (they are reversible) and
-jump to reflashing.
+This plan is ordered cheapest / most-reversible first. Do not skip the reversible
+phases and jump to reflashing.
 
-> ⚠️ **Brick risk is real.** The only boot image lives in the NAND. A bad reflash
-> with no recovery path = a dead camera. Get a **sacrificial second body** before
-> anything irreversible.
+> 🎯 **Primary lead: the UART debug Monitor** (see the README's
+> [COACH Monitor lead](../README.md#the-coach-monitor-lead)). On the COACH 15S
+> reference firmware the Monitor runs on **UART port 0, 115200 8N1** and includes
+> `MonitorSetExposure` (manual shutter — the goal) and `MonitorNandReadPhysical` /
+> `MonitorFlashDumpData` (firmware dump). If the W800 exposes it, Phases 2–4 below
+> may be unnecessary: you'd set exposure and dump firmware straight from the
+> serial prompt. So **Phase 1 is now about reaching that Monitor**, not just a
+> boot log. (Reachability on the W800 is unverified.)
+
+> ⚠️ **Brick risk is real** (only for the reflash phase). The boot image lives in
+> the NAND; a bad reflash with no recovery path = a dead camera. Get a
+> **sacrificial second body** before anything irreversible. Reading via the
+> Monitor is non-destructive.
 
 ---
 
@@ -25,10 +33,18 @@ jump to reflashing.
 
 ---
 
-## Phase 1 — Find the UART debug console (reversible)
+## Phase 1 — Find the UART and reach the Monitor (reversible)
 
-COACH firmware almost always has a boot console. The Lytro teardown found one;
-this is the single highest-value, lowest-risk step.
+COACH firmware has a boot console and, on the reference, an interactive debug
+Monitor. This is the single highest-value, lowest-risk step.
+
+> After you get bytes out of the UART: if boot text appears, send a newline and
+> look for a **`>` / `prompt> ` prompt**. If one appears, type **`ls`** to list
+> the registered Monitor commands, then `help <name>`. Hunt for the W800's
+> equivalent of **`MonitorSetExposure`** (set manual shutter — the goal) and
+> **`MonitorNandReadPhysical`** / **`MonitorFlashDumpData`** (dump firmware).
+> The reference baud is **115200 8N1**; its full candidate set is
+> `115200, 230400, 460800, 921600, 38400, 9600`.
 
 1. **Power the board on the bench** (external supply or battery) with the back
    accessible.
